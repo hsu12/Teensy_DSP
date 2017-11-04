@@ -16,11 +16,32 @@ const int ANALOG_READ_RESOLUTION = 10; // Bits of resolution for the ADC.
 const int ANALOG_READ_AVERAGING = 16;  // Number of samples to average with each ADC reading.
 const int POWER_LED_PIN = 13;          // Output pin for power LED (pin 13 to use Teensy 3.0's onboard LED).
 
+const int NEO_PIXEL_COUNT = 10;  
+
 float mainVolume = 0;
 int TONE_WINDOW_MS = 4000;             // Maximum amount of milliseconds allowed to enter the full sequence.
 const int FFT_SIZE = 256;              // Size of the FFT.  Realistically can only be at most 256
 
+
+
+// INTERNAL STATE
+// These shouldn't be modified unless you know what you're doing.
+////////////////////////////////////////////////////////////////////////////////
+
+IntervalTimer samplingTimer;
+float samples[FFT_SIZE*2];
+float magnitudes[FFT_SIZE];
+int sampleCounter = 0;
+//char commandBuffer[MAX_CHARS];
+float frequencyWindow[10+1];
+//float hues[NEO_PIXEL_COUNT];
+
+
+
 void setup() {
+    // Set up serial port.
+  Serial.begin(38400);
+  
   // Set up ADC and audio input.
   pinMode(AUDIO_INPUT_PIN, INPUT);
   analogReadResolution(ANALOG_READ_RESOLUTION);
@@ -29,23 +50,118 @@ void setup() {
   // Turn on the power indicator LED.
   pinMode(POWER_LED_PIN, OUTPUT);
   digitalWrite(POWER_LED_PIN, HIGH);
+
+  // Begin sampling audio
+  samplingBegin();
+
+
+   // Initialize spectrum display
+  //spectrumSetup();
+  
+  // Begin sampling audio
+  samplingBegin();
 }
 
 void loop() {
   // put your main code here, to run repeatedly:
   mainVolume = analogRead(AUDIO_INPUT_PIN);    // read the input pin
+               // debug value
+    if (samplingIsDone()) {
+    // Run FFT on sample data.
+    arm_cfft_radix4_instance_f32 fft_inst;
+    arm_cfft_radix4_init_f32(&fft_inst, FFT_SIZE, 0, 1);
+    arm_cfft_radix4_f32(&fft_inst, samples);
+    // Calculate magnitude of complex numbers output by the FFT.
+    arm_cmplx_mag_f32(samples, magnitudes, FFT_SIZE);
+  
+//    if (LEDS_ENABLED == 1)
+ //   {
+      spectrumLoop();
+  //  }
+  
+    // Restart audio sampling.
+    samplingBegin();
+  }
 
-  Serial.println(mainVolume);             // debug value
+  
+  
+}
+
+
+// Compute the average magnitude of a target frequency window vs. all other frequencies.
+void windowMean(float* magnitudes, int lowBin, int highBin, float* windowMean, float* otherMean) {
+    *windowMean = 0;
+    *otherMean = 0;
+    // Notice the first magnitude bin is skipped because it represents the
+    // average power of the signal.
+    for (int i = 1; i < FFT_SIZE/2; ++i) {
+      if (i >= lowBin && i <= highBin) {
+        *windowMean += magnitudes[i];
+      }
+      else {
+        *otherMean += magnitudes[i];
+      }
+    }
+    *windowMean /= (highBin - lowBin) + 1;
+    *otherMean /= (FFT_SIZE / 2 - (highBin - lowBin));
+}
+
+// Convert a frequency to the appropriate FFT bin it will fall within.
+int frequencyToBin(float frequency) {
+  float binFrequency = float(SAMPLE_RATE_HZ) / float(FFT_SIZE);
+  return int(frequency / binFrequency);
 }
 
 
 
+
+void spectrumLoop() {
+  // Update each LED based on the intensity of the audio 
+  // in the associated frequency window.
+  float intensity, otherMean;
+  for (int i = 0; i < NEO_PIXEL_COUNT; ++i) {
+    windowMean(magnitudes, 
+               frequencyToBin(frequencyWindow[i]),
+               frequencyToBin(frequencyWindow[i+1]),
+               &intensity,
+               &otherMean);
+    // Convert intensity to decibels.
+    intensity = 20.0*log10(intensity);
+    Serial.println(intensity);
+    // Scale the intensity and clamp between 0 and 1.0.
+    //intensity -= SPECTRUM_MIN_DB;
+    //intensity = intensity < 0.0 ? 0.0 : intensity;
+    //intensity /= (SPECTRUM_MAX_DB-SPECTRUM_MIN_DB);
+    //intensity = intensity > 1.0 ? 1.0 : intensity;
+    //pixels.setPixelColor(i, pixelHSVtoRGBColor(hues[i], 1.0, intensity));
+  }
+  //pixels.show();
+}
+
+
+
+void samplingCallback() {
+  // Read from the ADC and store the sample data
+  samples[sampleCounter] = (float32_t)analogRead(AUDIO_INPUT_PIN);
+  Serial.println(analogRead(AUDIO_INPUT_PIN));
+  // Complex FFT functions require a coefficient for the imaginary part of the input.
+  // Since we only have real data, set this coefficient to zero.
+  samples[sampleCounter+1] = 0.0;
+  // Update sample buffer position and stop after the buffer is filled
+  sampleCounter += 2;
+  if (sampleCounter >= FFT_SIZE*2) {
+    samplingTimer.end();
+  }
+}
+
 void samplingBegin() {
- 
+   // Reset sample buffer position and start callback at necessary rate.
+  sampleCounter = 0;
+  samplingTimer.begin(samplingCallback, 1000000/SAMPLE_RATE_HZ); 
 }
 
 boolean samplingIsDone() {
- 
+  return sampleCounter >= FFT_SIZE*2;
 }
 
 
